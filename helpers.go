@@ -34,6 +34,7 @@ func (v *Velox) CreateFolderIfNotExists(path string) error {
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -45,6 +46,7 @@ func (v *Velox) CreateFileIfNotExists(path string) error {
 		if err != nil {
 			return err
 		}
+
 		defer func(file *os.File) {
 			_ = file.Close()
 		}(file)

@@ -1,31 +1,37 @@
 package main
 
 import (
-	"fmt"
-	"time"
-
 	"github.com/fatih/color"
 )
 
 func doAuth() error {
+	checkForDB()
 	//migrations
 	dbType := vel.DB.DbType
-	fileName := fmt.Sprintf("%d_create_auth_tables", time.Now().UnixMicro())
-	upFile := vel.RootPath + "/migrations/" + fileName + ".up.sql"
-	downFile := vel.RootPath + "/migrations/" + fileName + ".down.sql"
 
-	err := copyFileFromTemplate("templates/migrations/auth_tables."+dbType+".sql", upFile)
+	tx, err := vel.PopConnect()
+	if err != nil {
+		exitGracefully(err)
+	}
+	defer tx.Close()
+
+	upBytes, err := templateFS.ReadFile("templates/migrations/auth_tables." + dbType + ".sql")
 	if err != nil {
 		exitGracefully(err)
 	}
 
-	err = copyDataToFile([]byte("drop table if exists users cascade; drop table if exists tokens cascade;drop table if exists remember_tokens;"), downFile)
+	downBytes := ([]byte("drop table if exists users cascade; drop table if exists tokens cascade;drop table if exists remember_tokens;"))
+	if err != nil {
+		exitGracefully(err)
+	}
+
+	err = vel.CreatePopMigration(upBytes, downBytes, "auth", "sql")
 	if err != nil {
 		exitGracefully(err)
 	}
 
 	//run migrations
-	err = doMigrate("up", "")
+	err = vel.RunPopMigrations(tx)
 	if err != nil {
 		exitGracefully(err)
 	}

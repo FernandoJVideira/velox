@@ -3,12 +3,17 @@ package velox
 import (
 	"fmt"
 	"log"
-	"net/http"
+	"net"
+	"net/rpc"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/FernandoJVideira/velox/filesystems/miniofilesystem"
+	"github.com/FernandoJVideira/velox/filesystems/s3filesystem"
+	"github.com/FernandoJVideira/velox/filesystems/sftpfilesystem"
+	"github.com/FernandoJVideira/velox/filesystems/webdavfilesystem"
 	"github.com/FernandoJVideira/velox/mailer"
 
 	"github.com/dgraph-io/badger/v3"
@@ -32,6 +37,8 @@ var badgerCache *cache.BadgerCache
 var redisPool *redis.Pool
 var badgerConn *badger.DB
 
+var maintenanceMode bool
+
 // Velox is the overall struct for the framework. Members are exported so they can be used by the user.
 type Velox struct {
 	AppName       string
@@ -51,6 +58,11 @@ type Velox struct {
 	Scheduler     *cron.Cron
 	Mail          mailer.Mail
 	Server        Server
+	FileSystems   map[string]interface{}
+	S3            s3filesystem.S3
+	SFTP          sftpfilesystem.SFTP
+	WebDAV        webdavfilesystem.WebDAV
+	Minio         miniofilesystem.Minio
 }
 
 type Server struct {
@@ -67,14 +79,23 @@ type config struct {
 	sessionType string
 	database    dbConfig
 	redis       redisConfig
+	uploads     uploadConfig
 }
 
+type uploadConfig struct {
+	allowedMimeTypes []string
+	maxUploadSize    int64
+}
+
+// New reads the .env file, creates our application config, populates the Velox type with settings
+// based on .env values, and creates necessary folders and files if they don't exist
 func (v *Velox) New(rootPath string) error {
 	//Create folder structure if it doesn't exist
 	pathConfig := initPaths{
 		RootPath:    rootPath,
-		FolderNames: []string{"handlers", "migrations", "views", "mail", "data", "public", "tmp", "logs", "middleware"},
+		FolderNames: []string{"handlers", "migrations", "views", "mail", "data", "public", "tmp", "logs", "middleware", "screenshots"},
 	}
+
 	err := v.Init(pathConfig)
 	if err != nil {
 		return err
@@ -108,13 +129,13 @@ func (v *Velox) New(rootPath string) error {
 	v.Scheduler = scheduler
 
 	if os.Getenv("CACHE") == "redis" || os.Getenv("SESSION_TYPE") == "redis" {
-		redisCache = v.CreateClientRedisCache()
+		redisCache = v.createClientRedisCache()
 		v.Cache = redisCache
 		redisPool = redisCache.Conn
 	}
 
 	if os.Getenv("CACHE") == "badger" {
-		badgerCache = v.CreateClientBadgerCache()
+		badgerCache = v.createClientBadgerCache()
 		v.Cache = badgerCache
 		badgerConn = badgerCache.Conn
 
@@ -135,6 +156,22 @@ func (v *Velox) New(rootPath string) error {
 	v.Mail = v.createMailer()
 	v.Routes = v.routes().(*chi.Mux)
 
+	//File Uploads
+	exploded := strings.Split(os.Getenv("ALLOWED_FILETYPES"), ",")
+	var mimeTypes []string
+
+	for _, m := range exploded {
+		mimeTypes = append(mimeTypes, m)
+	}
+
+	var maxUploadSize int64
+
+	if max, err := strconv.Atoi(os.Getenv("MAX_UPLOAD_SIZE")); err != nil {
+		maxUploadSize = 10 << 20
+	} else {
+		maxUploadSize = int64(max)
+	}
+
 	// Set config
 	v.config = config{
 		port:     os.Getenv("PORT"),
@@ -142,7 +179,7 @@ func (v *Velox) New(rootPath string) error {
 		cookie: cookieConfig{
 			name:     os.Getenv("COOKIE_NAME"),
 			lifetime: os.Getenv("COOKIE_LIFETIME"),
-			presist:  os.Getenv("COOKIE_PERSISTS"),
+			persist:  os.Getenv("COOKIE_PERSISTS"),
 			secure:   os.Getenv("COOKIE_SECURE"),
 			domain:   os.Getenv("COOKIE_DOMAIN"),
 		},
@@ -155,6 +192,10 @@ func (v *Velox) New(rootPath string) error {
 			host:     os.Getenv("REDIS_HOST"),
 			password: os.Getenv("REDIS_PASS"),
 			prefix:   os.Getenv("REDIS_PREFIX"),
+		},
+		uploads: uploadConfig{
+			maxUploadSize:    maxUploadSize,
+			allowedMimeTypes: mimeTypes,
 		},
 	}
 
@@ -171,10 +212,11 @@ func (v *Velox) New(rootPath string) error {
 		URL:        os.Getenv("APP_URL"),
 	}
 
-	// Create session
+	// create session
+
 	sess := session.Session{
 		CookieLifetime: v.config.cookie.lifetime,
-		CookiePersist:  v.config.cookie.presist,
+		CookiePersist:  v.config.cookie.persist,
 		CookieName:     v.config.cookie.name,
 		SessionType:    v.config.sessionType,
 		CookieDomain:   v.config.cookie.domain,
@@ -208,6 +250,7 @@ func (v *Velox) New(rootPath string) error {
 
 	// Create renderer
 	v.CreateRenderer()
+	v.FileSystems = v.createFileSystems()
 	go v.Mail.ListenForMail()
 
 	return nil
@@ -224,34 +267,6 @@ func (v *Velox) Init(p initPaths) error {
 		}
 	}
 	return nil
-}
-
-// ListenAndServe starts the web server
-func (v *Velox) ListenAndServe() {
-	srv := &http.Server{
-		Addr:         fmt.Sprintf(":%s", os.Getenv("PORT")),
-		ErrorLog:     v.ErrorLog,
-		Handler:      v.Routes,
-		IdleTimeout:  30 * time.Second,
-		ReadTimeout:  5 * time.Second,
-		WriteTimeout: 600 * time.Second,
-	}
-
-	if v.DB.Pool != nil {
-		defer v.DB.Pool.Close()
-	}
-
-	if redisPool != nil {
-		defer redisPool.Close()
-	}
-
-	if badgerConn != nil {
-		defer badgerConn.Close()
-	}
-
-	v.InfoLog.Printf("Listening on port %s", os.Getenv("PORT"))
-	err := srv.ListenAndServe()
-	v.ErrorLog.Fatal(err)
 }
 
 // checkDotEnv checks if the .env file exists, if not it creates it
@@ -307,14 +322,14 @@ func (v *Velox) createMailer() mailer.Mail {
 	return m
 }
 
-func (v *Velox) CreateClientBadgerCache() *cache.BadgerCache {
+func (v *Velox) createClientBadgerCache() *cache.BadgerCache {
 	badgerCache := cache.BadgerCache{
 		Conn: v.createBadgerConn(),
 	}
 	return &badgerCache
 }
 
-func (v *Velox) CreateClientRedisCache() *cache.RedisCache {
+func (v *Velox) createClientRedisCache() *cache.RedisCache {
 	cacheClient := cache.RedisCache{
 		Conn:   v.createRedisPool(),
 		Prefix: v.config.redis.prefix,
@@ -332,6 +347,7 @@ func (v *Velox) createRedisPool() *redis.Pool {
 				v.config.redis.host,
 				redis.DialPassword(v.config.redis.password))
 		},
+
 		TestOnBorrow: func(conn redis.Conn, t time.Time) error {
 			_, err := conn.Do("PING")
 			return err
@@ -347,6 +363,7 @@ func (v *Velox) createBadgerConn() *badger.DB {
 	return db
 }
 
+// BuildDSN builds the datasource name for our database, and returns it as a string
 func (v *Velox) BuildDSN() string {
 	var dsn string
 
@@ -358,11 +375,121 @@ func (v *Velox) BuildDSN() string {
 			os.Getenv("DATABASE_USER"),
 			os.Getenv("DATABASE_NAME"),
 			os.Getenv("DATABASE_SSL_MODE"))
+
+		// we check to see if a database password has been supplied, since including "password=" with nothing
+		// after it sometimes causes postgres to fail to allow a connection.
 		if os.Getenv("DATABASE_PASS") != "" {
 			dsn = fmt.Sprintf("%s password=%s", dsn, os.Getenv("DATABASE_PASS"))
 		}
+
+	case "mysql", "mariadb":
+		dsn = fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?collation=utf8_unicode_ci&timeout=5s&parseTime=true&tls=%s&readTimeout=5s",
+			os.Getenv("DATABASE_USER"),
+			os.Getenv("DATABASE_PASS"),
+			os.Getenv("DATABASE_HOST"),
+			os.Getenv("DATABASE_PORT"),
+			os.Getenv("DATABASE_NAME"),
+			os.Getenv("DATABASE_SSL_MODE"))
+
 	default:
+
 	}
 
 	return dsn
+}
+
+func (v *Velox) createFileSystems() map[string]interface{} {
+	fileSystems := make(map[string]interface{})
+
+	if os.Getenv("MINIO_SECRET") != "" {
+		useSSL := false
+		if strings.ToLower(os.Getenv("MINIO_USESSL")) == "true" {
+			useSSL = true
+		}
+
+		minio := miniofilesystem.Minio{
+			Endpoint: os.Getenv("MINIO_ENDPOINT"),
+			Key:      os.Getenv("MINIO_KEY"),
+			Secret:   os.Getenv("MINIO_SECRET"),
+			UseSSL:   useSSL,
+			Region:   os.Getenv("MINIO_REGION"),
+			Bucket:   os.Getenv("MINIO_BUCKET"),
+		}
+
+		fileSystems["MINIO"] = minio
+		v.Minio = minio
+	}
+
+	if os.Getenv("SFTP_HOST") != "" {
+		sftp := sftpfilesystem.SFTP{
+			Host: os.Getenv("SFTP_HOST"),
+			User: os.Getenv("SFTP_USER"),
+			Pass: os.Getenv("SFTP_PASS"),
+			Port: os.Getenv("SFTP_PORT"),
+		}
+		fileSystems["SFTP"] = sftp
+		v.SFTP = sftp
+	}
+
+	if os.Getenv("WEBDAV_HOST") != "" {
+		webDav := webdavfilesystem.WebDAV{
+			Host: os.Getenv("WEBDAV_HOST"),
+			User: os.Getenv("WEBDAV_USER"),
+			Pass: os.Getenv("WEBDAV_PASS"),
+		}
+		fileSystems["WEBDAV"] = webDav
+		v.WebDAV = webDav
+	}
+
+	if os.Getenv("S3_KEY") != "" {
+		s3 := s3filesystem.S3{
+			Key:      os.Getenv("S3_KEY"),
+			Secret:   os.Getenv("S3_SECRET"),
+			Region:   os.Getenv("S3_REGION"),
+			Endpoint: os.Getenv("S3_ENDPOINT"),
+			Bucket:   os.Getenv("S3_BUCKET"),
+		}
+		fileSystems["S3"] = s3
+		v.S3 = s3
+	}
+
+	return fileSystems
+}
+
+type RPCServer struct{}
+
+func (r *RPCServer) MaintenanceMode(inMaintenanceMode bool, resp *string) error {
+	if inMaintenanceMode {
+		maintenanceMode = true
+		*resp = "Server is in maintenance mode"
+	} else {
+		maintenanceMode = false
+		*resp = "Server Live!"
+	}
+	return nil
+}
+
+func (v *Velox) listenRPC() {
+	//if nothing specified for RPC port, don't start the server
+	if os.Getenv("RPC_PORT") != "" {
+		v.InfoLog.Println("Starting RPC server on port", os.Getenv("RPC_PORT"))
+		err := rpc.Register(new(RPCServer))
+		if err != nil {
+			v.ErrorLog.Println(err)
+			return
+		}
+		listen, err := net.Listen("tcp", "127.0.0.1:"+os.Getenv("RPC_PORT"))
+		if err != nil {
+			v.ErrorLog.Println(err)
+			return
+		}
+
+		for {
+			rpcConn, err := listen.Accept()
+			if err != nil {
+				continue
+			}
+			go rpc.ServeConn(rpcConn)
+		}
+	}
 }

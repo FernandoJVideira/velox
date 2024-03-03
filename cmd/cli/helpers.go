@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -60,21 +61,36 @@ func getDSN() string {
 	}
 }
 
+func checkForDB() {
+	dbType := vel.DB.DbType
+
+	if dbType == "" {
+		exitGracefully(errors.New("no database connection in .env file"))
+	}
+
+	if !fileExists(vel.RootPath + "/config/database.yml") {
+		exitGracefully(errors.New("config/database.yml does not exist"))
+	}
+}
+
 func showHelp() {
 	color.Yellow(`Available commands:
 
-	help 				- Shows this help message
-	version				- Shows the current version of the CLI
-	migrate				- Runs all up migrations thet have not been run yet
-	migrate down			- Reverts the most recent migration
-	migrate reset			- Runs all down migrations in reverse order and then runs all up migrations
-	make migration <name>		- Creates up and down migration files in the migrations folder
-	make auth			- Creates the auth tables, files and middleware
-	make handler <name>		- Creates a stub handler file in the handlers directory
-	make model <name>		- Creates a stub model file in the data directory
-	make session		        - Creates a table in the database to store session data
-	make key			- Generates a random 32 character key
-	make mail <name>		- Generates 2 starter mail templates in the mail directory
+	help                           - Shows this help message
+	new <appname>                  - Creates a new Velox application
+	down                           - Put the Server in maintenance mode
+	up                             - Take the Server out of maintenance mode
+	version                        - Shows the current version of the CLI
+	migrate                        - Runs all up migrations thet have not been run yet
+	migrate down                   - Reverts the most recent migration
+	migrate reset                  - Runs all down migrations in reverse order and then runs all up migrations
+	make migration <name> <format> - Creates up and down migration files in the migrations folder; format = sql/fizz (default fizz)
+	make auth                      - Creates the auth tables, files and middleware
+	make handler <name>            - Creates a stub handler file in the handlers directory
+	make model <name>              - Creates a stub model file in the data directory
+	make session                   - Creates a table in the database to store session data
+	make key                       - Generates a random 32 character key
+	make mail <name>               - Generates 2 starter mail templates in the mail directory
 `)
 }
 

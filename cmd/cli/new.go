@@ -115,11 +115,17 @@ func doNew(appName string) {
 
 	// run go mod tidy in the project dir
 	color.Yellow("\t Running go mod tidy...")
-	cmd := exec.Command("go", "mod", "tidy")
+	cmd := exec.Command("go", "get", "github.com/FernandoJVideira/velox")
 	err = cmd.Start()
 	if err != nil {
 		exitGracefully(err)
 	}
 
-	color.Green("\t Done building" + appName + "!")
+	cmd = exec.Command("go", "mod", "tidy")
+	err = cmd.Start()
+	if err != nil {
+		exitGracefully(err)
+	}
+
+	color.Green("\t Done building " + appName + "!")
 }

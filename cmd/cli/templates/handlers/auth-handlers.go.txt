@@ -1,16 +1,27 @@
 package handlers
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"log"
 	"myapp/data"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/CloudyKit/jet/v6"
 	"github.com/FernandoJVideira/velox/mailer"
 	"github.com/FernandoJVideira/velox/urlsigner"
+	"github.com/go-chi/chi/v5"
+	"github.com/gorilla/sessions"
+	"github.com/markbates/goth"
+	"github.com/markbates/goth/gothic"
+	"github.com/markbates/goth/providers/github"
+	"github.com/markbates/goth/providers/google"
 )
 
 // UserLogin displays the login page
@@ -98,6 +109,8 @@ func (h *Handlers) Logout(w http.ResponseWriter, r *http.Request) {
 		rt := data.RememberToken{}
 		_ = rt.Delete(h.App.Session.GetString(r.Context(), "remember_token"))
 	}
+
+	h.socialLogout(w, r)
 
 	// delete cookie
 	newCookie := http.Cookie{
@@ -250,4 +263,144 @@ func (h *Handlers) PostResetPassword(w http.ResponseWriter, r *http.Request) {
 	//Redirect the user
 	h.App.Session.Put(r.Context(), "flash", "Password reset successfully")
 	http.Redirect(w, r, "/users/login", http.StatusSeeOther)
+}
+
+func (h *Handlers) InitSocialAuth() {
+	scope := []string{"user"}
+	gScope := []string{"email", "profile"}
+
+	goth.UseProviders(
+		github.New(os.Getenv("GITHUB_KEY"), os.Getenv("GITHUB_SECRET"), os.Getenv("GITHUB_CALLBACK"), scope...),
+		google.New(os.Getenv("GOOGLE_KEY"), os.Getenv("GOOGLE_SECRET"), os.Getenv("GOOGLE_CALLBACK"), gScope...),
+	)
+
+	key := os.Getenv("KEY")
+	maxAge := 86400 * 30
+
+	st := sessions.NewCookieStore([]byte(key))
+	st.MaxAge(maxAge)
+	st.Options.Path = "/"
+	st.Options.HttpOnly = true
+
+	st.Options.Secure = func() bool {
+		if os.Getenv("DEBUG") == "true" {
+			return false
+		}
+		return true
+	}()
+
+	gothic.Store = st
+}
+
+func (h *Handlers) SocialLogin(w http.ResponseWriter, r *http.Request) {
+	provider := chi.URLParam(r, "provider")
+	h.sessionPut(r.Context(), "social_provider", provider)
+	h.InitSocialAuth()
+
+	if _, err := gothic.CompleteUserAuth(w, r); err == nil {
+		//User is already authenticated
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+	} else {
+		//Attempt to authenticate the user
+		gothic.BeginAuthHandler(w, r)
+	}
+}
+
+func (h *Handlers) SocialMediaCallback(w http.ResponseWriter, r *http.Request) {
+	h.InitSocialAuth()
+	gUser, err := gothic.CompleteUserAuth(w, r)
+	if err != nil {
+		h.sessionPut(r.Context(), "error", err.Error())
+		http.Redirect(w, r, "/users/login", http.StatusSeeOther)
+		return
+	}
+
+	//Check if the user exists
+	var u data.User
+	var testUser *data.User
+	testUser, err = u.GetByEmail(gUser.Email)
+	if err != nil {
+		log.Println(err)
+		provider := h.sessionGet(r.Context(), "social_provider").(string)
+
+		//We don't have a user, so create one
+		var newUser data.User
+		if provider == "github" {
+			exploded := strings.Split(gUser.Name, " ")
+			newUser.FirstName = exploded[0]
+			if len(exploded) > 1 {
+				newUser.LastName = exploded[1]
+			}
+		} else {
+			newUser.FirstName = gUser.FirstName
+			newUser.LastName = gUser.LastName
+		}
+		newUser.Active = 1
+		newUser.Email = gUser.Email
+		newUser.Password = h.randomString(20)
+		newUser.CreatedAt = time.Now()
+		newUser.UpdatedAt = time.Now()
+		_, err := newUser.Insert(newUser)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		}
+		testUser, err = u.GetByEmail(gUser.Email)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		}
+	}
+	h.sessionPut(r.Context(), "userID", testUser.ID)
+	h.sessionPut(r.Context(), "social_token", gUser.AccessToken)
+	h.sessionPut(r.Context(), "social_email", gUser.Email)
+
+	h.sessionPut(r.Context(), "flash", "You have been logged in successfully")
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+func (h *Handlers) socialLogout(w http.ResponseWriter, r *http.Request) {
+	provider, ok := h.sessionGet(r.Context(), "social_provider").(string)
+	if !ok {
+		return
+	}
+
+	//Call the apropiate api to logout and revoke the token
+	//Each provider has its own way of doing this
+	//(if it is possible at all)
+
+	switch provider {
+	case "github":
+		clientID := os.Getenv("GITHUB_KEY")
+		clientSecret := os.Getenv("GITHUB_SECRET")
+
+		//Revoke the token
+		token := h.sessionGet(r.Context(), "social_token").(string)
+
+		var payload struct {
+			AccessToken string `json:"access_token"`
+		}
+		payload.AccessToken = token
+
+		jsonReq, _ := json.Marshal(payload)
+		req, err := http.NewRequest(http.MethodDelete,
+			fmt.Sprintf("https://%s:%s@api.github.com/applications/%s/grant", clientID, clientSecret, clientID),
+			bytes.NewBuffer(jsonReq))
+		if err != nil {
+			h.App.ErrorLog.Println(err)
+			return
+		}
+
+		client := &http.Client{}
+		_, err = client.Do(req)
+		if err != nil {
+			h.App.ErrorLog.Println(err)
+			return
+		}
+	case "google":
+		token := h.sessionGet(r.Context(), "social_token").(string)
+		_, err := http.PostForm(fmt.Sprintf("https://accounts.google.com/o/oauth2/revoke?token=%s", token), nil)
+		if err != nil {
+			h.App.ErrorLog.Println("Error logging out from Google: ", err)
+			return
+		}
+	}
 }
