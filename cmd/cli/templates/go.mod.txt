@@ -1,4 +1,4 @@
-module myapp
+module ${APP_NAME}
 
 go 1.22.0
 
