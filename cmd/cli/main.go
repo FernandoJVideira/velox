@@ -8,7 +8,7 @@ import (
 	"github.com/fatih/color"
 )
 
-const version = "1.0.0"
+const version = "1.0.1"
 
 var vel velox.Velox
 
