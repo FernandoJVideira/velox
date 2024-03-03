@@ -30,7 +30,7 @@ import (
 )
 
 // Velox Version
-const version = "1.0.0"
+const version = "1.0.1"
 
 var redisCache *cache.RedisCache
 var badgerCache *cache.BadgerCache
