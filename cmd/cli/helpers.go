@@ -74,14 +74,21 @@ func checkForDB() {
 }
 
 func showHelp() {
-	color.Yellow(`Available commands:
+	color.Yellow(`
+Velox is a laravel like CLI tool to build web applications.
+
+Usage: 
+	velox <command> [arguments]
+
+
+The commands are:
 
 	help                           - Shows this help message
 	new <appname>                  - Creates a new Velox application
-	down                           - Put the Server in maintenance mode
-	up                             - Take the Server out of maintenance mode
+	down                           - Puts the Server in maintenance mode
+	up                             - Takes the Server out of maintenance mode
 	version                        - Shows the current version of the CLI
-	migrate                        - Runs all up migrations thet have not been run yet
+	migrate                        - Runs all up migrations that have not been run yet
 	migrate down                   - Reverts the most recent migration
 	migrate reset                  - Runs all down migrations in reverse order and then runs all up migrations
 	make migration <name> <format> - Creates up and down migration files in the migrations folder; format = sql/fizz (default fizz)

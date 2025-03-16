@@ -10,10 +10,6 @@ cover:
 coverage:
 	@go test -cover ./...
 
-## build_cli: builds the command line tool velox and copies it to myapp
-build_cli:
-	@go build -o ../dist/velox ./cmd/cli
-
 ## build: builds the command line tool dist directory
 build:
 	@go build -o ./dist/velox ./cmd/cli

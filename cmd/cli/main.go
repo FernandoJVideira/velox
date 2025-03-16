@@ -92,8 +92,7 @@ func exitGracefully(err error, msg ...string) {
 
 	if len(message) > 0 {
 		color.Yellow(message)
-	} else {
-		color.Green("Finished!")
 	}
+
 	os.Exit(0)
 }

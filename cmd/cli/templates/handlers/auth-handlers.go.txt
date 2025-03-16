@@ -166,7 +166,7 @@ func (h *Handlers) PostForgot(w http.ResponseWriter, r *http.Request) {
 	}
 
 	//Sign the link
-	signedLink := sign.GenereateTokenFromString(link)
+	signedLink := sign.GenerateTokenFromString(link)
 	h.App.InfoLog.Println("Signed link is: ", signedLink)
 
 	//Send the email

@@ -12,7 +12,7 @@ type Signer struct {
 	Secret []byte
 }
 
-func (s *Signer) GenereateTokenFromString(data string) string {
+func (s *Signer) GenerateTokenFromString(data string) string {
 	var urlToSign string
 
 	crypt := goalone.New(s.Secret, goalone.Timestamp)
@@ -32,10 +32,8 @@ func (s *Signer) VerifyToken(token string) bool {
 	crypt := goalone.New(s.Secret, goalone.Timestamp)
 
 	_, err := crypt.Unsign([]byte(token))
-	if err != nil {
-		return false
-	}
-	return true
+
+	return err == nil
 }
 
 func (s *Signer) Expired(token string, minutesUntilExpired int) bool {
